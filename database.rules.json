@@ -1,0 +1,19 @@
+{
+  "rules": {
+    "rooms": {
+      "$code": {
+        ".read": "$code.matches(/^[A-Z]{4}$/)",
+        ".write": "$code.matches(/^[A-Z]{4}$/)",
+        "host": { ".validate": "newData.hasChildren(['at'])" },
+        "peers": { "$id": { ".validate": "newData.hasChildren(['at'])" } },
+        "toHost": {
+          "$m": { ".validate": "newData.child('from').isString() && newData.child('d').isString() && newData.child('d').val().length < 20000" }
+        },
+        "toPeer": {
+          "$id": { "$m": { ".validate": "newData.child('d').isString() && newData.child('d').val().length < 200000" } }
+        },
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}
