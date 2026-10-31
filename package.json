@@ -1,0 +1,15 @@
+{
+  "name": "mechana-clash",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Family robot card battle game: local and cross-device play, GitHub Pages ready.",
+  "scripts": {
+    "test": "node --test tests/engine.test.js",
+    "art": "node tools/export-art.mjs assets/cards",
+    "build": "node tools/build.mjs",
+    "start": "npx --yes serve ."
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}
