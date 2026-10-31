@@ -28,6 +28,22 @@ const app = {
   sel: null, eventKey: '', turnKey: '', cpuTimer: null, modal: null, filter: 'all', handoff: null, lastHuman: null,
 };
 
+/* ---------- screen wake lock & status ---------- */
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* not supported or denied */ }
+}
+function releaseAwake() {
+  try { wakeLock?.release(); } catch { /* ignore */ }
+  wakeLock = null;
+}
+function setStatus(msg) {
+  app.status = msg;
+  const el = document.getElementById('net-status');
+  if (el) el.textContent = msg;
+  else if (app.screen === 'host' || app.screen === 'join') render();
+}
+
 /* ---------- components ---------- */
 function cardHTML(id, { size = 'md', u = null, cls = '' } = {}) {
   const c = CARD_MAP[id], T = TYPES[c.type], W = TYPES[weakTo(c.type)], E = EFFECTS[c.effect];
@@ -95,9 +111,9 @@ function hostSeat(s, i) {
 function hostView() {
   return `${topbar('Host online game')}
     <div class="panel center"><div class="muted">Room code</div><div class="code">${esc(app.code || '····')}</div>
-      <div class="muted">${esc(app.status)}</div>
+      <div class="muted" id="net-status">${esc(app.status)}</div>
       <div class="row"><button class="btn sm" data-act="copy-link">📋 Copy invite link</button>${typeof navigator.share === 'function' ? '<button class="btn sm" data-act="share">📤 Share</button>' : ''}</div>
-      <p class="small">Friends open this page on their phone or tablet, tap <b>Join online game</b> and type the code.</p></div>
+      <p class="small">Friends open this page on their phone or tablet, tap <b>Join online game</b> and type the code.<br>Keep this page open: if you switch apps, come back here so the room can reconnect.</p></div>
     <div class="panel"><h3>Players (${app.hostSeats.length}/4)</h3>${app.hostSeats.map(hostSeat).join('')}
       ${app.hostSeats.length < 4 ? '<button class="btn sm" data-act="add-cpu">+ Add CPU</button>' : ''}</div>
     <div class="panel"><label class="lbl">Points to win ${targetSelect()}</label></div>
@@ -106,7 +122,7 @@ function hostView() {
 
 function joinView() {
   if (app.mode === 'client' && app.conn) {
-    return `${topbar('Online game')}<div class="panel center"><div class="muted">Room</div><div class="code">${esc(app.code)}</div><p>${esc(app.status)}</p>
+    return `${topbar('Online game')}<div class="panel center"><div class="muted">Room</div><div class="code">${esc(app.code)}</div><p id="net-status">${esc(app.status)}</p>
       <ul class="lobby">${app.lobby.map((s, i) => `<li><span class="dot c${i}"></span>${esc(s.name)} ${s.kind === 'remote' ? '📱' : s.kind === 'human' ? '👑' : '🤖'}</li>`).join('')}</ul>
       <p class="muted">First to ${app.target} points wins</p></div>`;
   }
@@ -115,7 +131,7 @@ function joinView() {
     <label class="lbl">Room code<input id="code" class="codein" maxlength="4" value="${esc(app.code)}" autocomplete="off" autocapitalize="characters"></label>
     <label class="lbl">Your name<input data-me="name" maxlength="14" value="${esc(app.myName)}" placeholder="Player"></label>
     <label class="lbl">Brain Boost level<select data-me="level">${levelOpts(app.myLevel)}</select></label>
-    <p class="muted">${esc(app.status)}</p>
+    <p class="muted" id="net-status">${esc(app.status)}</p>
     <button class="btn big go" data-act="join" ${connecting ? 'disabled' : ''}>${connecting ? 'Connecting…' : 'Join! 🔗'}</button></div>`;
 }
 
@@ -352,7 +368,8 @@ function leave() {
   clearTimeout(app.cpuTimer);
   const p = app.peer;
   Object.assign(app, { peer: null, conn: null, conns: [], mode: null, game: null, modal: null, handoff: null, status: '', lobby: [], screen: 'title' });
-  if (p) try { p.destroy(); } catch { /* already closed */ }
+  p?.destroy?.();
+  releaseAwake();
   render();
 }
 
@@ -360,15 +377,17 @@ function leave() {
 const shareLink = () => `${location.origin}${location.pathname}?room=${app.code}`;
 function startHosting() {
   if (!net.hasPeer()) return toast('Online play could not load. Check your internet connection.');
-  if (app.peer) try { app.peer.destroy(); } catch { /* ignore */ }
-  app.mode = 'host'; app.me = 0; app.code = net.roomCode(); app.status = 'Opening room…'; app.conns = []; app.screen = 'host';
+  app.peer?.destroy?.();
+  app.mode = 'host'; app.me = 0; app.code = net.roomCode(); app.conns = []; app.screen = 'host';
+  app.status = 'Opening room…';
   app.hostSeats = [{ name: app.myName || 'Host', kind: 'human', level: app.myLevel }];
-  render();
+  render(); keepAwake();
   app.peer = net.host(app.code, {
-    onOpen: () => { app.status = 'Room ready! Share the code with your family.'; if (app.screen === 'host') render(); },
+    onOpen: () => setStatus('✅ Room ready! Share the code with your family.'),
+    onStatus: setStatus,
     onError: (e) => {
-      if (e.type === 'unavailable-id') return startHosting();
-      app.status = 'Connection problem: ' + (e.type || e.message); if (app.screen === 'host') render();
+      if (e.type === 'unavailable-id') return startHosting(); // code already taken, so pick another
+      setStatus('Connection problem: ' + (e.type || e.message));
     },
     onConn: (conn) => {
       if (app.game && app.screen === 'game') { conn.send({ t: 'full', msg: 'That game has already started.' }); setTimeout(() => conn.close(), 400); return; }
@@ -437,15 +456,18 @@ function joinRoom() {
   if (!/^[A-Z]{4}$/.test(code)) return toast('Room codes are 4 letters');
   app.code = code; app.myName = (app.myName || '').trim() || 'Player'; store.set('name', app.myName);
   app.mode = 'client'; app.status = 'Connecting…'; render();
+  keepAwake();
   app.peer = net.join(code, {
     onOpen: (conn) => { app.conn = conn; conn.send({ t: 'hello', name: app.myName, level: app.myLevel }); app.status = 'Connected! Waiting for the host to start…'; render(); },
+    onStatus: setStatus,
     onData: clientData,
     onClose: () => { if (app.mode === 'client') { toast('Disconnected from the host'); leave(); } },
     onError: (e) => {
       if (app.mode !== 'client' || app.screen === 'game') return;
-      const p = app.peer; app.peer = null; app.mode = null; app.conn = null;
-      if (p) try { p.destroy(); } catch { /* ignore */ }
-      app.status = e.type === 'peer-unavailable' ? 'Room not found. Check the code with your host.' : 'Connection problem: ' + (e.type || e.message);
+      app.peer?.destroy?.(); app.peer = null; app.mode = null; app.conn = null;
+      app.status = e.type === 'peer-unavailable' ? 'Room not found. Make sure the host screen says "Room ready".'
+        : e.type === 'timeout' ? 'Found the room but could not connect. Try both devices on the same Wi-Fi or both on mobile data.'
+        : 'Connection problem: ' + (e.type || e.message);
       render();
     },
   });
@@ -549,6 +571,13 @@ document.addEventListener('input', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && app.modal?.kind === 'info') { app.modal = null; render(); } });
+
+// Phones pause background tabs: when the page comes back, reconnect the room and re-take the wake lock.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  app.peer?.wake?.();
+  if (app.mode) keepAwake();
+});
 
 const room = new URLSearchParams(location.search).get('room');
 if (room) { app.code = room.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4); app.screen = 'join'; }
