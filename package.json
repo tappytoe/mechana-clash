@@ -7,8 +7,12 @@
   "scripts": {
     "test": "node --test tests/engine.test.js",
     "art": "node tools/export-art.mjs assets/cards",
+    "thumbnail": "node tools/thumbnail.mjs assets",
     "build": "node tools/build.mjs",
     "start": "npx --yes serve ."
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2"
   },
   "engines": { "node": ">=20" },
   "license": "MIT"
