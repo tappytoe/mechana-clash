@@ -12,6 +12,31 @@
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Show loading errors on screen instead of a blank page (phones have no console).
+    (function () {
+      var shown = false;
+      function show(msg) {
+        if (shown) return; shown = true;
+        var box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;background:#5a1020;color:#fff;' +
+          'font:14px/1.4 system-ui,sans-serif;padding:12px 14px;border-radius:12px;border:2px solid #ff7a7a;white-space:pre-wrap;word-break:break-word';
+        box.textContent = '⚠️ The game could not start:\n' + msg + '\n\nTip: check js/firebase-config.js, then reload.';
+        (document.body || document.documentElement).appendChild(box);
+      }
+      window.addEventListener('error', function (e) {
+        var t = e.target;
+        if (t && t.tagName === 'SCRIPT') show('Could not load ' + (t.src || 'a script'));
+        else if (e.message) show(e.message + (e.filename ? '\n(' + e.filename.split('/').slice(-2).join('/') + ':' + e.lineno + ')' : ''));
+      }, true);
+      window.addEventListener('load', function () {
+        setTimeout(function () {
+          var app = document.getElementById('app');
+          if (app && !app.innerHTML.trim()) show('The game script did not run. A file in js/ may be missing, misnamed, or have a typo.');
+        }, 3000);
+      });
+    })();
+  </script>
 </head>
 <body>
   <main id="app" aria-live="polite"></main>
