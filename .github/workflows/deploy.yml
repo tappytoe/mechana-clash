@@ -23,9 +23,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install build tools
+        run: npm install --no-audit --no-fund
       - name: Test rules, AI, quiz and art
         run: npm test
-      - name: Build site and export card art
+      - name: Build site, card art and thumbnail
         run: npm run build
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
