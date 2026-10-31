@@ -1,29 +1,34 @@
-// Cross-device play over WebRTC, using Trystero for matchmaking.
-// Players find each other through public Nostr relays (no server of our own),
-// then all game data flows directly between devices, end-to-end encrypted.
-// This module keeps the same interface main.js already uses.
+// Online play through Firebase Realtime Database (free tier).
+// Every device talks to Google's servers over HTTPS/WebSockets, so it works on any network:
+// same Wi-Fi, different Wi-Fi or mobile data. Keeps the same interface main.js already uses.
+import { firebaseConfig } from './firebase-config.js';
 
-const TRYSTERO_URL = 'https://esm.run/trystero@0.21.4'; // pinned version, Nostr strategy (default)
+const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
+const GRACE_MS = 20000; // how long a dropped player/host may take to come back
+let fbPromise = null;
 
-const CONFIG = {
-  appId: 'mechana-clash-tappytoe-v1',
-  rtcConfig: {
-    iceServers: [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      // Free public TURN relay: helps phones on different networks (e.g. mobile data vs Wi-Fi).
-      // If it ever stops working, replace with your own TURN credentials.
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    ],
-  },
-};
-const roomId = (code) => `room-${code}`;
+function loadFirebase() {
+  if (!fbPromise) {
+    fbPromise = (async () => {
+      const url = firebaseConfig?.databaseURL || '';
+      if (!url || url.includes('YOUR-')) {
+        throw new Error('Online play is not set up yet. Add your Firebase settings to js/firebase-config.js.');
+      }
+      const [appMod, dbMod] = await Promise.all([
+        import(`${SDK}/firebase-app.js`),
+        import(`${SDK}/firebase-database.js`),
+      ]);
+      const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(firebaseConfig);
+      return { ...dbMod, db: dbMod.getDatabase(app) };
+    })().catch((e) => { fbPromise = null; throw e; });
+  }
+  return fbPromise;
+}
 
-let libPromise = null;
-const loadLib = () => (libPromise ??= import(TRYSTERO_URL));
+const errOf = (e) => ({ message: e?.message || String(e) });
+const pack = (data) => JSON.stringify(data); // stored as a string so arrays/nulls survive intact
+const unpack = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-// The library loads on demand, so online play is always offered; load errors arrive via onError.
 export const hasPeer = () => true;
 
 export function roomCode() {
@@ -32,94 +37,165 @@ export function roomCode() {
 }
 
 export function host(code, h) {
-  let room = null, closed = false;
-  const conns = new Map();
+  let F = null, closed = false, owned = false;
+  const offs = [], conns = new Map(), timers = new Map();
+  const path = (p = '') => `rooms/${code}${p}`;
 
   (async () => {
     try {
-      const { joinRoom } = await loadLib();
+      F = await loadFirebase();
       if (closed) return;
-      room = joinRoom(CONFIG, roomId(code));
-      const [send, receive] = room.makeAction('m');
+      const { db, ref, get, set, push, remove, onChildAdded, onChildRemoved, onValue, onDisconnect, serverTimestamp } = F;
+      const hostRef = ref(db, path('/host'));
 
-      room.onPeerJoin((id) => {
-        const conn = {
+      if ((await get(hostRef)).exists()) { h.onError({ type: 'unavailable-id' }); return; }
+      if (closed) return;
+      await remove(ref(db, path())); // clear leftovers from an old game that used this code
+      const register = async () => {
+        await onDisconnect(hostRef).remove();
+        await set(hostRef, { at: serverTimestamp() });
+      };
+      await register();
+      owned = true;
+      if (closed) { remove(ref(db, path())).catch(() => {}); return; }
+
+      const ensureConn = (id) => {
+        let conn = conns.get(id);
+        if (conn) { clearTimeout(timers.get(id)); timers.delete(id); return conn; }
+        conn = {
           peer: id,
           open: true,
-          send: (data) => { if (conn.open) send(data, id); },
-          close: () => { conn.open = false; },
+          send: (data) => { if (conn.open) push(ref(db, path(`/toPeer/${id}`)), { d: pack(data) }).catch(() => {}); },
+          close: () => { conn.open = false; remove(ref(db, path(`/peers/${id}`))).catch(() => {}); },
         };
         conns.set(id, conn);
-        send({ t: 'host' }, id); // tell the newcomer "I'm the host of this room"
         h.onConn(conn);
-      });
+        return conn;
+      };
 
-      room.onPeerLeave((id) => {
-        const conn = conns.get(id);
-        if (!conn) return;
-        conn.open = false;
-        conns.delete(id);
-        h.onClose(conn);
-      });
+      offs.push(onChildAdded(ref(db, path('/peers')), (snap) => { if (!closed) ensureConn(snap.key); }));
 
-      receive((data, id) => {
-        const conn = conns.get(id);
-        if (conn && conn.open) h.onData(conn, data);
-      });
+      offs.push(onChildRemoved(ref(db, path('/peers')), (snap) => {
+        const id = snap.key, conn = conns.get(id);
+        if (!conn || closed) return;
+        clearTimeout(timers.get(id));
+        timers.set(id, setTimeout(() => {
+          timers.delete(id);
+          if (!conns.has(id)) return;
+          conn.open = false;
+          conns.delete(id);
+          remove(ref(db, path(`/toPeer/${id}`))).catch(() => {});
+          h.onClose(conn);
+        }, conn.open ? GRACE_MS : 0));
+      }));
+
+      offs.push(onChildAdded(ref(db, path('/toHost')), (snap) => {
+        const m = snap.val() || {};
+        remove(snap.ref).catch(() => {});
+        if (closed || typeof m.from !== 'string') return;
+        const conn = ensureConn(m.from);
+        const data = unpack(m.d);
+        if (conn.open && data) h.onData(conn, data);
+      }));
+
+      let wasOnline = true;
+      offs.push(onValue(ref(db, '.info/connected'), (s) => {
+        if (closed) return;
+        if (s.val() === true) {
+          if (!wasOnline) register().then(() => h.onOpen()).catch(() => {});
+          wasOnline = true;
+        } else {
+          wasOnline = false;
+          h.onStatus(`📶 Connection lost, reconnecting… (code stays ${code})`);
+        }
+      }));
 
       h.onOpen();
     } catch (e) {
-      h.onError({ type: 'load', message: e?.message || String(e) });
+      if (!closed) h.onError(errOf(e));
     }
   })();
 
   return {
-    wake() { /* Trystero reconnects to relays on its own */ },
-    destroy() { closed = true; try { room?.leave(); } catch { /* ignore */ } },
+    wake() { /* Firebase reconnects by itself */ },
+    destroy() {
+      if (closed) return;
+      closed = true;
+      offs.forEach((off) => off());
+      timers.forEach((t) => clearTimeout(t));
+      if (F && owned) F.remove(F.ref(F.db, path())).catch(() => {});
+    },
   };
 }
 
 export function join(code, h) {
-  let room = null, closed = false, hostId = null, timer = null;
+  let F = null, closed = false, myId = null, hostTimer = null;
+  const offs = [];
+  const path = (p = '') => `rooms/${code}${p}`;
+
+  const api = {
+    wake() { /* Firebase reconnects by itself */ },
+    destroy() {
+      if (closed) return;
+      closed = true;
+      clearTimeout(hostTimer);
+      offs.forEach((off) => off());
+      if (F && myId) {
+        F.remove(F.ref(F.db, path(`/peers/${myId}`))).catch(() => {});
+        F.remove(F.ref(F.db, path(`/toPeer/${myId}`))).catch(() => {});
+      }
+    },
+  };
 
   (async () => {
     try {
-      const { joinRoom } = await loadLib();
+      F = await loadFirebase();
       if (closed) return;
-      room = joinRoom(CONFIG, roomId(code));
-      const [send, receive] = room.makeAction('m');
+      const { db, ref, get, set, push, remove, onChildAdded, onValue, onDisconnect, serverTimestamp } = F;
       h.onStatus(`Looking for room ${code}…`);
 
-      timer = setTimeout(() => {
-        if (!hostId && !closed) h.onError({ type: 'peer-unavailable' });
-      }, 30000);
+      if (!(await get(ref(db, path('/host')))).exists()) { h.onError({ type: 'peer-unavailable' }); return; }
+      if (closed) return;
 
-      receive((data, id) => {
-        if (!hostId && data && data.t === 'host') {
-          hostId = id;
-          clearTimeout(timer);
-          const conn = {
-            peer: id,
-            get open() { return !closed && hostId === id; },
-            send: (msg) => send(msg, id),
-            close: () => { try { room?.leave(); } catch { /* ignore */ } },
-          };
-          h.onOpen(conn);
-          return;
-        }
-        if (id === hostId) h.onData(data);
-      });
+      const meRef = push(ref(db, path('/peers')));
+      myId = meRef.key;
+      const register = async () => {
+        await onDisconnect(meRef).remove();
+        await set(meRef, { at: serverTimestamp() });
+      };
+      await register();
+      if (closed) return;
 
-      room.onPeerLeave((id) => {
-        if (id === hostId) { hostId = null; h.onClose(); }
-      });
+      let wasOnline = true;
+      offs.push(onValue(ref(db, '.info/connected'), (s) => {
+        if (closed) return;
+        if (s.val() === true) { if (!wasOnline) register().catch(() => {}); wasOnline = true; }
+        else wasOnline = false;
+      }));
+
+      offs.push(onChildAdded(ref(db, path(`/toPeer/${myId}`)), (snap) => {
+        const data = unpack(snap.val()?.d);
+        remove(snap.ref).catch(() => {});
+        if (data && !closed) h.onData(data);
+      }));
+
+      offs.push(onValue(ref(db, path('/host')), (s) => {
+        if (closed) return;
+        if (s.exists()) { clearTimeout(hostTimer); hostTimer = null; }
+        else if (!hostTimer) hostTimer = setTimeout(() => { if (!closed) h.onClose(); }, GRACE_MS);
+      }));
+
+      const conn = {
+        peer: 'host',
+        get open() { return !closed; },
+        send: (data) => { if (!closed) push(ref(db, path('/toHost')), { from: myId, d: pack(data) }).catch(() => {}); },
+        close: () => api.destroy(),
+      };
+      h.onOpen(conn);
     } catch (e) {
-      h.onError({ type: 'load', message: e?.message || String(e) });
+      if (!closed) h.onError(errOf(e));
     }
   })();
 
-  return {
-    wake() { /* nothing needed */ },
-    destroy() { closed = true; clearTimeout(timer); try { room?.leave(); } catch { /* ignore */ } },
-  };
+  return api;
 }
