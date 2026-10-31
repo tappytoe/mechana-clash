@@ -1,8 +1,30 @@
-// Cross-device play with WebRTC (PeerJS), with auto-reconnect for phones.
-const PREFIX = 'mechana-clash-v1-';
-const NET_ERRORS = new Set(['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']);
+// Cross-device play over WebRTC, using Trystero for matchmaking.
+// Players find each other through public Nostr relays (no server of our own),
+// then all game data flows directly between devices, end-to-end encrypted.
+// This module keeps the same interface main.js already uses.
 
-export const hasPeer = () => typeof window !== 'undefined' && typeof window.Peer === 'function';
+const TRYSTERO_URL = 'https://esm.run/trystero@0.21.4'; // pinned version, Nostr strategy (default)
+
+const CONFIG = {
+  appId: 'mechana-clash-tappytoe-v1',
+  rtcConfig: {
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      // Free public TURN relay: helps phones on different networks (e.g. mobile data vs Wi-Fi).
+      // If it ever stops working, replace with your own TURN credentials.
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    ],
+  },
+};
+const roomId = (code) => `room-${code}`;
+
+let libPromise = null;
+const loadLib = () => (libPromise ??= import(TRYSTERO_URL));
+
+// The library loads on demand, so online play is always offered; load errors arrive via onError.
+export const hasPeer = () => true;
 
 export function roomCode() {
   const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -10,82 +32,94 @@ export function roomCode() {
 }
 
 export function host(code, h) {
-  let peer = null, tries = 0, timer = null, closed = false, everOpened = false;
+  let room = null, closed = false;
+  const conns = new Map();
 
-  const retry = () => {
-    if (closed) return;
-    clearTimeout(timer);
-    const wait = Math.min(1500 * 2 ** tries++, 15000);
-    h.onStatus(`📶 Connection lost, reconnecting in ${Math.round(wait / 1000)}s… (code stays ${code})`);
-    timer = setTimeout(() => {
+  (async () => {
+    try {
+      const { joinRoom } = await loadLib();
       if (closed) return;
-      if (peer && !peer.destroyed && peer.disconnected) {
-        try { peer.reconnect(); return; } catch { /* fall through and rebuild */ }
-      }
-      if (!peer || peer.destroyed) start();
-    }, wait);
-  };
+      room = joinRoom(CONFIG, roomId(code));
+      const [send, receive] = room.makeAction('m');
 
-  function start() {
-    peer = new window.Peer(PREFIX + code, { debug: 1 });
-    peer.on('open', () => { everOpened = true; tries = 0; h.onOpen(); });
-    peer.on('disconnected', retry);
-    peer.on('connection', (conn) => {
-      conn.on('open', () => h.onConn(conn));
-      conn.on('data', (d) => h.onData(conn, d));
-      conn.on('close', () => h.onClose(conn));
-    });
-    peer.on('error', (e) => {
-      // After a drop the server may briefly still hold our code, so wait and retry with the same code.
-      if (e.type === 'unavailable-id' && everOpened) {
-        try { peer.destroy(); } catch { /* ignore */ }
-        retry();
-        return;
-      }
-      if (NET_ERRORS.has(e.type)) { retry(); return; }
-      h.onError(e);
-    });
-  }
+      room.onPeerJoin((id) => {
+        const conn = {
+          peer: id,
+          open: true,
+          send: (data) => { if (conn.open) send(data, id); },
+          close: () => { conn.open = false; },
+        };
+        conns.set(id, conn);
+        send({ t: 'host' }, id); // tell the newcomer "I'm the host of this room"
+        h.onConn(conn);
+      });
 
-  start();
+      room.onPeerLeave((id) => {
+        const conn = conns.get(id);
+        if (!conn) return;
+        conn.open = false;
+        conns.delete(id);
+        h.onClose(conn);
+      });
+
+      receive((data, id) => {
+        const conn = conns.get(id);
+        if (conn && conn.open) h.onData(conn, data);
+      });
+
+      h.onOpen();
+    } catch (e) {
+      h.onError({ type: 'load', message: e?.message || String(e) });
+    }
+  })();
+
   return {
-    wake() { if (!closed && (!peer || peer.destroyed || peer.disconnected)) { tries = 0; retry(); } },
-    destroy() { closed = true; clearTimeout(timer); try { peer?.destroy(); } catch { /* ignore */ } },
+    wake() { /* Trystero reconnects to relays on its own */ },
+    destroy() { closed = true; try { room?.leave(); } catch { /* ignore */ } },
   };
 }
 
 export function join(code, h) {
-  let peer = null, tries = 0, closed = false, connected = false, timer = null;
-  const MAX = 4;
+  let room = null, closed = false, hostId = null, timer = null;
 
-  const fail = (e) => {
-    if (closed || connected) return;
-    try { peer?.destroy(); } catch { /* ignore */ }
-    if (++tries < MAX) {
-      h.onStatus(`Looking for room ${code}… (try ${tries + 1}/${MAX})`);
-      timer = setTimeout(start, 2500);
-    } else {
-      h.onError(e);
+  (async () => {
+    try {
+      const { joinRoom } = await loadLib();
+      if (closed) return;
+      room = joinRoom(CONFIG, roomId(code));
+      const [send, receive] = room.makeAction('m');
+      h.onStatus(`Looking for room ${code}…`);
+
+      timer = setTimeout(() => {
+        if (!hostId && !closed) h.onError({ type: 'peer-unavailable' });
+      }, 30000);
+
+      receive((data, id) => {
+        if (!hostId && data && data.t === 'host') {
+          hostId = id;
+          clearTimeout(timer);
+          const conn = {
+            peer: id,
+            get open() { return !closed && hostId === id; },
+            send: (msg) => send(msg, id),
+            close: () => { try { room?.leave(); } catch { /* ignore */ } },
+          };
+          h.onOpen(conn);
+          return;
+        }
+        if (id === hostId) h.onData(data);
+      });
+
+      room.onPeerLeave((id) => {
+        if (id === hostId) { hostId = null; h.onClose(); }
+      });
+    } catch (e) {
+      h.onError({ type: 'load', message: e?.message || String(e) });
     }
-  };
+  })();
 
-  function start() {
-    if (closed) return;
-    peer = new window.Peer({ debug: 1 });
-    peer.on('error', fail);
-    peer.on('open', () => {
-      const conn = peer.connect(PREFIX + code, { reliable: true });
-      const t = setTimeout(() => fail({ type: 'timeout' }), 15000);
-      conn.on('open', () => { connected = true; clearTimeout(t); h.onOpen(conn); });
-      conn.on('data', h.onData);
-      conn.on('close', () => { if (connected) h.onClose(); });
-      conn.on('error', (e) => { if (!connected) { clearTimeout(t); fail(e); } });
-    });
-  }
-
-  start();
   return {
-    wake() { /* the data connection survives signalling drops */ },
-    destroy() { closed = true; clearTimeout(timer); try { peer?.destroy(); } catch { /* ignore */ } },
+    wake() { /* nothing needed */ },
+    destroy() { closed = true; clearTimeout(timer); try { room?.leave(); } catch { /* ignore */ } },
   };
 }
