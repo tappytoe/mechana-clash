@@ -1,24 +1,35 @@
 // Online play through Firebase Realtime Database (free tier).
-// Every device talks to Google's servers over HTTPS/WebSockets, so it works on any network:
-// same Wi-Fi, different Wi-Fi or mobile data. Keeps the same interface main.js already uses.
-import { firebaseConfig } from './firebase-config.js';
+// Every device talks to Google's servers over HTTPS/WebSockets, so it works on any network.
+// The config is loaded lazily, so a broken config only affects online play, not the whole game.
 
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 const GRACE_MS = 20000; // how long a dropped player/host may take to come back
 let fbPromise = null;
 
+async function loadConfig() {
+  let mod;
+  try {
+    mod = await import('./firebase-config.js');
+  } catch (e) {
+    throw new Error(`js/firebase-config.js could not load (${e?.message || e}). It must start with "export const firebaseConfig = {" and contain no import lines.`);
+  }
+  const cfg = mod.firebaseConfig || mod.default;
+  const url = cfg?.databaseURL || '';
+  if (!url || url.includes('YOUR-')) {
+    throw new Error('Online play is not set up yet: add your Firebase settings (including databaseURL) to js/firebase-config.js.');
+  }
+  return cfg;
+}
+
 function loadFirebase() {
   if (!fbPromise) {
     fbPromise = (async () => {
-      const url = firebaseConfig?.databaseURL || '';
-      if (!url || url.includes('YOUR-')) {
-        throw new Error('Online play is not set up yet. Add your Firebase settings to js/firebase-config.js.');
-      }
+      const cfg = await loadConfig();
       const [appMod, dbMod] = await Promise.all([
         import(`${SDK}/firebase-app.js`),
         import(`${SDK}/firebase-database.js`),
       ]);
-      const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(firebaseConfig);
+      const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(cfg);
       return { ...dbMod, db: dbMod.getDatabase(app) };
     })().catch((e) => { fbPromise = null; throw e; });
   }
