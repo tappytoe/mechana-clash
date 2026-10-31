@@ -118,4 +118,39 @@ input,select{font:inherit;padding:8px 10px;border-radius:10px;border:2px solid #
 .quiz .q{font-size:1.8rem;font-weight:800}
 .show{font-size:1.5rem;word-break:break-all}
 .answers{display:grid;grid-template-columns:1fr 1fr;gap:10px;width:100%}
-.ans{font-size:1.6rem;padding:14px
+.ans{font-size:1.6rem;padding:14px}
+.ans.right{background:var(--go);color:#0b3320}.ans.wrong{background:#e8322c}
+.verdict{font-size:1.2rem;font-weight:800}
+.trophy{font-size:4rem;animation:bob 2s ease-in-out infinite}
+.rank{text-align:left;padding-left:1.2em;line-height:1.7}.rank li{display:list-item}
+.toast{position:fixed;bottom:calc(20px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:#000d;padding:10px 16px;border-radius:12px;z-index:70;max-width:90vw;text-align:center}
+.banner{position:fixed;left:50%;top:38%;transform:translate(-50%,-50%);z-index:60;font-size:clamp(1.3rem,5vw,2.4rem);font-weight:800;padding:12px 22px;border-radius:18px;background:#1a1830ee;border:3px solid #fff;max-width:92vw;text-align:center;animation:bannerIn 1.5s forwards;pointer-events:none}
+.banner.weak{background:linear-gradient(90deg,#ffb020,#ff5a3c);color:var(--ink)}
+.banner.ko{background:linear-gradient(90deg,#ff3b6b,#8a2be2)}
+.banner.math{background:#fff;color:var(--ink)}
+.float{position:absolute;left:50%;top:30%;transform:translateX(-50%);font-size:2.4rem;font-weight:800;color:#ff3b3b;-webkit-text-stroke:2px #fff;pointer-events:none;animation:floatUp 1.2s forwards;z-index:5}
+.confetti{position:fixed;top:-12px;width:10px;height:14px;z-index:80;border-radius:2px;animation-name:fall;animation-timing-function:linear;animation-fill-mode:forwards;pointer-events:none}
+.hit{animation:shake .5s}.lunge{animation:lunge .45s}
+
+@keyframes pulse{50%{transform:scale(1.04)}}
+@keyframes glow{to{box-shadow:0 0 18px #ffb020}}
+@keyframes bob{50%{transform:translateY(-8px)}}
+@keyframes pop{0%{transform:scale(.6)}70%{transform:scale(1.08)}100%{transform:scale(1)}}
+@keyframes shake{20%{transform:translateX(-8px) rotate(-2deg)}40%{transform:translateX(8px) rotate(2deg)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}}
+@keyframes lunge{40%{transform:translateY(-14px) scale(1.03)}}
+@keyframes floatUp{to{transform:translate(-50%,-70px);opacity:0}}
+@keyframes fall{to{transform:translateY(110vh) rotate(720deg)}}
+@keyframes bannerIn{0%{transform:translate(-50%,-50%) scale(.3);opacity:0}15%{transform:translate(-50%,-50%) scale(1.1);opacity:1}25%{transform:translate(-50%,-50%) scale(1)}85%{opacity:1}100%{opacity:0}}
+
+@media (max-width:600px){
+  .card.lg{width:180px}.card.md{width:128px}.empty{width:128px}.empty.big{width:180px}
+  .n4 .opp .card.md{width:100px}.n4 .opp .c-eff,.n4 .opp .c-type,.n3 .opp .c-eff{display:none}
+  .actions{min-width:0;max-width:none;width:100%}
+  .fan-card .card.md{width:118px}
+}
+@media print{
+  body{background:#fff}body::before,.bar,.chips,.toast,.banner{display:none}
+  #app{max-width:none;padding:0}.gallery{gap:4mm}
+  .card{box-shadow:none;width:63mm;break-inside:avoid;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
